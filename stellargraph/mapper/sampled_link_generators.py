@@ -75,7 +75,7 @@ class BatchedLinkGenerator(abc.ABC):
     def sample_features(self, head_links, batch_num):
         pass
 
-    def flow(self, link_ids, targets=None, shuffle=False):
+    def flow(self, link_ids, targets=None, shuffle=False, seed=None):
         """
         Creates a generator/sequence object for training or evaluation
         with the supplied node ids and numeric targets.
@@ -99,6 +99,7 @@ class BatchedLinkGenerator(abc.ABC):
                 `(len(link_ids), target_size)`
             shuffle (bool): If True the links will be shuffled at each
                 epoch, if False the links will be processed in order.
+            seed (int, optional): Random seed
 
         Returns:
             A NodeSequence object to use with with StellarGraph models
@@ -139,7 +140,12 @@ class BatchedLinkGenerator(abc.ABC):
                     )
 
             return LinkSequence(
-                self.sample_features, self.batch_size, link_ids, targets, shuffle
+                self.sample_features,
+                self.batch_size,
+                link_ids,
+                targets=targets,
+                shuffle=shuffle,
+                seed=seed,
             )
 
         else:
@@ -348,8 +354,11 @@ class HinSAGELinkGenerator(BatchedLinkGenerator):
         )
 
         # The sampler used to generate random samples of neighbours
-        self.sampler = SampledHeterogeneousBreadthFirstWalk(
-            G, graph_schema=self.schema, seed=seed
+        self._samplers = SeededPerBatch(
+            lambda s: SampledHeterogeneousBreadthFirstWalk(
+                G, graph_schema=self.schema, seed=s
+            ),
+            seed=seed,
         )
 
     def _get_features(self, node_samples, head_size):
@@ -399,7 +408,7 @@ class HinSAGELinkGenerator(BatchedLinkGenerator):
 
             # Get sampled nodes for the subgraphs starting from the (src, dst) head nodes
             # nodes_samples is list of two lists: [[samples for src], [samples for dst]]
-            node_samples = self.sampler.run(
+            node_samples = self._samplers[batch_num].run(
                 nodes=head_nodes, n=1, n_size=self.num_samples
             )
 
