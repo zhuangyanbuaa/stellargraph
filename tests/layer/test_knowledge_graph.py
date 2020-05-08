@@ -30,6 +30,7 @@ from stellargraph.layer.knowledge_graph import (
     ComplEx,
     DistMult,
     RotatE,
+    RotationHE,
     _ranks_from_score_columns,
 )
 
@@ -207,6 +208,46 @@ def test_rotate(knowledge_graph):
     # the model is stateful (i.e. it holds the weights permanently) so the predictions with a second
     # 'build' should be the same as the original one
     model2 = Model(*rotate_model.in_out_tensors())
+    prediction2 = model2.predict(gen.flow(df))
+    assert np.array_equal(prediction, prediction2)
+
+
+@pytest.mark.parametrize("hyperbolic", [False, True])
+def test_rotationhe(knowledge_graph, hyperbolic):
+    # this test creates a random untrained model and predicts every possible edge in the graph, and
+    # compares that to a direct implementation of the scoring method in the paper
+    gen = KGTripleGenerator(knowledge_graph, 3)
+
+    # use a random initializer with a large range, so that any differences are obvious
+    init = initializers.RandomUniform(-1, 1)
+    rotationh_model = RotationHE(
+        gen, 6, embeddings_initializer=init, hyperbolic=hyperbolic
+    )
+    x_inp, x_out = rotationh_model.in_out_tensors()
+
+    model = Model(x_inp, x_out)
+    model.summary()
+    # model.compile(loss=losses.BinaryCrossentropy(from_logits=True))
+
+    every_edge = itertools.product(
+        knowledge_graph.nodes(),
+        knowledge_graph._edges.types.pandas_index,
+        knowledge_graph.nodes(),
+    )
+    df = triple_df(*every_edge)
+
+    # check the model can be trained on a few (uneven) batches
+    # model.fit(
+    #    gen.flow(df.iloc[:7], negative_samples=2),
+    #    validation_data=gen.flow(df.iloc[7:14], negative_samples=3),
+    # )
+
+    # predict every edge using the model
+    prediction = model.predict(gen.flow(df))
+
+    # the model is stateful (i.e. it holds the weights permanently) so the predictions with a second
+    # 'build' should be the same as the original one
+    model2 = Model(*rotationh_model.in_out_tensors())
     prediction2 = model2.predict(gen.flow(df))
     assert np.array_equal(prediction, prediction2)
 

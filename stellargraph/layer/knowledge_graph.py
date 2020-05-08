@@ -735,6 +735,155 @@ class RotatE:
         return x_inp, x_out
 
 
+def mobius_add(c, x, y):
+    c = tf.expand_dims(c, axis=0)
+    x_norm2 = tf.reduce_sum(x * x, axis=-1, keepdims=True)
+    y_norm2 = tf.reduce_sum(y * y, axis=-1, keepdims=True)
+    x_dot_y = tf.reduce_sum(x * y, axis=-1, keepdims=True)
+
+    inner = 1 + 2 * c * x_dot_y
+    numer = (inner + c * y_norm2) * x + (1 - c * x_norm2) * y
+    denom = inner + c * c * x_norm2 * y_norm2
+
+    return numer / denom
+
+
+def exp_map0(c, v):
+    """
+    exp_x^c(v) specialised for x = 0
+    """
+    v_norm2 = tf.reduce_sum(v * v, axis=-1)
+    c_v_norm = tf.sqrt(c * v_norm2)
+
+    coeff = tf.expand_dims(tf.math.tanh(c_v_norm) / c_v_norm, axis=-1)
+    return coeff * v
+
+
+def hyperbolic_distance(c, x, y):
+    sqrt_c = tf.sqrt(c)
+    return (2 / sqrt_c) * tf.atanh(sqrt_c * tf.norm(-mobius_add(c, x, y), axis=-1))
+
+
+class RotationHScoring(Layer):
+    def build(self, input_shapes):
+        self.curvature_prime = self.add_weight(shape=(1,), name="curvature_prime")
+        self.built = True
+
+    def call(self, inputs):
+        e_s, b_s, r_r, theta_r, e_o, b_o = inputs
+
+        curvature = tf.math.softplus(self.curvature_prime)
+        # the same curvature for every vector in the batch
+        curvature = tf.expand_dims(curvature, axis=0)
+
+        eh_s = exp_map0(curvature, e_s)
+        rh_r = exp_map0(curvature, r_r)
+        eh_o = exp_map0(curvature, e_o)
+
+        # manual rotation matrix
+        shape = tf.shape(eh_s)
+        cos = tf.math.cos(theta_r)
+        sin = tf.math.sin(theta_r)
+        evens = cos * eh_s[..., ::2] - sin * eh_s[..., 1::2]
+        odds = sin * eh_s[..., ::2] + cos * eh_s[..., 1::2]
+        rotated_s = tf.reshape(tf.stack([evens, odds], axis=-1), tf.shape(eh_s))
+
+        d = hyperbolic_distance(curvature, mobius_add(curvature, rotated_s, rh_r), eh_o)
+
+        return -tf.square(d) + b_s + b_o
+
+
+class RotationEScoring(Layer):
+    def call(self, inputs):
+        e_s, b_s, r_r, theta_r, e_o, b_o = inputs
+
+        # manual rotation matrix
+        shape = tf.shape(e_s)
+        cos = tf.math.cos(theta_r)
+        sin = tf.math.sin(theta_r)
+        evens = cos * e_s[..., ::2] - sin * e_s[..., 1::2]
+        odds = sin * e_s[..., ::2] + cos * e_s[..., 1::2]
+        rotated_s = tf.reshape(tf.stack([evens, odds], axis=-1), tf.shape(e_s))
+        d = tf.math.squared_difference(rotated_s + r_r, e_o)
+        return -d + b_s + b_o
+
+
+class RotationHE:
+    def __init__(
+        self,
+        generator,
+        embedding_dimension,
+        embeddings_initializer="normal",
+        embeddings_regularizer=None,
+        hyperbolic=True,
+    ):
+        if not isinstance(generator, KGTripleGenerator):
+            raise TypeError(
+                f"generator: expected KGTripleGenerator, found {type(generator).__name__}"
+            )
+
+        if embedding_dimension % 2 != 0:
+            raise ValueError(
+                f"embedding_dimension: expected an even integer, found {embedding_dimension}"
+            )
+
+        graph = generator.G
+        self.num_nodes = graph.number_of_nodes()
+        self.num_edge_types = len(graph._edges.types)
+        self.embedding_dimension = embedding_dimension
+
+        self._scoring = RotationHScoring() if hyperbolic else RotationEScoring()
+
+        self._node_embeddings = Embedding(
+            self.num_nodes,
+            embedding_dimension,
+            embeddings_initializer=embeddings_initializer,
+            embeddings_regularizer=embeddings_regularizer,
+        )
+        self._node_biases = Embedding(
+            self.num_nodes,
+            1,
+            embeddings_initializer=embeddings_initializer,
+            embeddings_regularizer=embeddings_regularizer,
+        )
+        self._edge_type_embeddings = Embedding(
+            self.num_edge_types,
+            embedding_dimension,
+            embeddings_initializer=embeddings_initializer,
+            embeddings_regularizer=embeddings_regularizer,
+        )
+        self._edge_type_rotation_phase = Embedding(
+            self.num_edge_types,
+            embedding_dimension // 2,
+            embeddings_initializer=embeddings_initializer,
+            embeddings_regularizer=embeddings_regularizer,
+        )
+
+    def __call__(self, x):
+        s_iloc, r_iloc, o_iloc = x
+
+        e_s = self._node_embeddings(s_iloc)
+        b_s = tf.squeeze(self._node_biases(s_iloc), axis=-1)
+
+        r_r = self._edge_type_embeddings(r_iloc)
+        theta_r = self._edge_type_rotation_phase(r_iloc)
+
+        e_o = self._node_embeddings(o_iloc)
+        b_o = tf.squeeze(self._node_biases(o_iloc), axis=-1)
+
+        return self._scoring([e_s, b_s, r_r, theta_r, e_o, b_o])
+
+    def in_out_tensors(self):
+        s_iloc = Input(shape=1)
+        r_iloc = Input(shape=1)
+        o_iloc = Input(shape=1)
+
+        x_inp = [s_iloc, r_iloc, o_iloc]
+        x_out = self(x_inp)
+
+        return x_inp, x_out
+
+
 def _ranks_from_comparisons(greater, greater_equal, tie_breaking):
     strict = 1 + greater.sum(axis=0)
     # with_ties - strict = the number of elements exactly equal (including the true edge itself)
