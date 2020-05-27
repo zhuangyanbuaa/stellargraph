@@ -36,17 +36,29 @@ class Neo4jStellarGraph:
     for machine learning.
 
     Args:
-        graph (py2neo.Graph): a py2neo.Graph connected to a Neo4j graph database.
+        graph_db (py2neo.Graph): a py2neo.Graph connected to a Neo4j graph database.
+        id_property (str, optional): Name of Neo4j property to use as ID.
+        features_property (str, optional): Name of Neo4j property to use as features.
         is_directed (bool, optional): If True, the data represents a
             directed multigraph, otherwise an undirected multigraph.
     """
 
-    def __init__(self, graph_db, is_directed=False):
+    def __init__(
+        self,
+        graph_db,
+        id_property="id",
+        features_property="features",
+        is_directed=False,
+    ):
 
         self.graph_db = graph_db
         self._is_directed = is_directed
         self._node_feature_size = None
         self._nodes = None
+
+        # names of properties to use when querying the database
+        self._id_property = id_property
+        self._features_property = features_property
 
         # FIXME: methods in this class currently only support homogeneous graphs with default node type
         self._node_type = globalvar.NODE_TYPE_DEFAULT
@@ -60,7 +72,7 @@ class Neo4jStellarGraph:
         """
         node_ids_query = f"""
             MATCH (n)
-            RETURN n.ID as node_id
+            RETURN n.{self._id_property} as node_id
             """
 
         result = self.graph_db.run(node_ids_query)
@@ -84,7 +96,7 @@ class Neo4jStellarGraph:
             where_clause = ""
             valid = slice(None)
         else:
-            where_clause = " WHERE node.ID = node_id"
+            where_clause = f"WHERE node.{self._id_property} = node_id"
             if isinstance(nodes, np.ndarray):
                 valid = nodes != None
                 # we need to create a list of integers to run the neo4j query with
@@ -103,7 +115,7 @@ class Neo4jStellarGraph:
         feature_query = f"""
             UNWIND $node_id_list AS node_id
             MATCH(node) {where_clause}
-            RETURN node.features as features
+            RETURN node.{self._features_property} as features
             """
         result = self.graph_db.run(feature_query, parameters={"node_id_list": nodes})
         rows = result.data()
@@ -148,7 +160,7 @@ class Neo4jStellarGraph:
             # if feature size is unknown, take a random node's features
             feature_query = f"""
                 MATCH(node)
-                RETURN node.features as features LIMIT 1
+                RETURN node.{self._features_property} as features LIMIT 1
                 """
             result = self.graph_db.run(feature_query)
             self._node_feature_size = len(result.data()[0]["features"])
@@ -173,8 +185,8 @@ class Neo4jStellarGraph:
         # not O(E) as it appears
         subgraph_query = f"""
             MATCH (source)-->(target)
-            WHERE source.ID IN $node_id_list AND target.ID IN $node_id_list
-            RETURN collect(source.ID) AS sources, collect(target.ID) as targets
+            WHERE source.{self._id_property} IN $node_id_list AND target.{self._id_property} IN $node_id_list
+            RETURN collect(source.{self._id_property}) AS sources, collect(target.{self._id_property}) as targets
             """
 
         result = self.graph_db.run(
