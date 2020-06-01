@@ -151,7 +151,6 @@ steps:
     env:
       RUNNER_DEPENDS_ON: neo4j
       NEO4J_VERSION: "3.5"
-    upload-container-logs: always
 
   - label: ":python-black: format"
     <<: *timeout
